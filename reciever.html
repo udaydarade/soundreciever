@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hamming Code Audio Receiver</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .hidden { display: none; }
+        button:disabled { cursor: not-allowed; opacity: 0.6; }
+        .result-bit {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            text-align: center;
+            line-height: 20px;
+            margin: 1px;
+            font-family: monospace;
+        }
+        .error-bit { background-color: #ef4444; color: white; border-radius: 4px; }
+        .corrected-bit { background-color: #22c55e; color: white; border-radius: 4px; }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-200 flex items-center justify-center min-h-screen p-4">
+
+    <div class="w-full max-w-3xl bg-gray-800 rounded-xl shadow-2xl p-6 md:p-8 border border-gray-700">
+        <div class="text-center mb-6">
+            <h1 class="text-3xl font-bold text-teal-400">Telecommunication System Receiver</h1>
+            <p class="text-gray-400 mt-2">Listen for an audio signal or manually enter a bitstring to decode.</p>
+        </div>
+
+        <!-- Mode Selection -->
+        <div id="mode-selection" class="flex justify-center gap-4 mb-6">
+            <button id="show-auto-btn" class="w-full bg-teal-500 hover:bg-teal-600 text-gray-900 font-bold py-3 px-6 rounded-lg transition">Automated Receiver</button>
+            <button id="show-manual-btn" class="w-full bg-gray-600 hover:bg-gray-700 text-white font-bold py-3 px-6 rounded-lg transition">Manual Decoder</button>
+        </div>
+
+        <!-- Automated Receiver UI -->
+        <div id="auto-receiver" class="hidden mb-6 text-center">
+            <button id="listen-btn" class="bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 px-8 rounded-lg">Start Listening</button>
+            <p id="auto-status" class="mt-4 text-yellow-400 h-6"></p>
+        </div>
+
+        <!-- Manual Decoder UI -->
+        <div id="manual-decoder" class="hidden mb-6">
+            <label for="manual-input" class="block text-sm font-medium text-gray-300 mb-2">Enter Received Bitstring:</label>
+            <input type="text" id="manual-input" class="w-full bg-gray-900 border border-gray-600 rounded-lg p-3 text-lg focus:ring-2 focus:ring-teal-500" placeholder="Paste the full transmitted string...">
+            <button id="decode-btn" class="w-full mt-4 bg-teal-500 hover:bg-teal-600 text-gray-900 font-bold py-3 rounded-lg">Decode</button>
+        </div>
+
+        <!-- Output Section -->
+        <div id="output-section" class="bg-gray-900/50 p-4 rounded-lg border border-gray-700 space-y-3 hidden">
+            <h2 class="text-xl font-semibold text-teal-300 border-b border-gray-600 pb-2 mb-3">Decoding Results</h2>
+            <div>
+                <p class="text-sm text-gray-400">Received String:</p>
+                <p id="received-string" class="font-mono text-lg break-all"></p>
+            </div>
+            <div>
+                <p class="text-sm text-gray-400">Syndrome (Error Position):</p>
+                <p id="syndrome" class="font-mono text-lg"></p>
+            </div>
+            <div>
+                <p class="text-sm text-gray-400">Corrected Codeword:</p>
+                <p id="corrected-codeword" class="font-mono text-lg break-all"></p>
+            </div>
+            <div class="pt-2">
+                <p class="text-sm text-gray-400">Extracted Message Length:</p>
+                <p id="msg-length" class="font-mono text-lg text-white"></p>
+            </div>
+            <div>
+                <p class="text-sm text-gray-400">Final Decoded Message:</p>
+                <p id="final-message" class="font-mono text-2xl text-green-400 break-all"></p>
+            </div>
+        </div>
+    </div>
+
+<script>
+// --- Constants ---
+const R = 5;
+const N = 2**R - 1; // 31
+const PARITY_POSITIONS = Array.from({ length: R }, (_, i) => 2**i);
+
+// --- DOM Elements ---
+const showAutoBtn = document.getElementById('show-auto-btn');
+const showManualBtn = document.getElementById('show-manual-btn');
+const autoReceiverUI = document.getElementById('auto-receiver');
+const manualDecoderUI = document.getElementById('manual-decoder');
+const outputSection = document.getElementById('output-section');
+
+// --- Mode Switching Logic ---
+showAutoBtn.addEventListener('click', () => {
+    autoReceiverUI.classList.remove('hidden');
+    manualDecoderUI.classList.add('hidden');
+    outputSection.classList.add('hidden');
+    showAutoBtn.classList.replace('bg-gray-600', 'bg-teal-500');
+    showManualBtn.classList.replace('bg-teal-500', 'bg-gray-600');
+});
+
+showManualBtn.addEventListener('click', () => {
+    manualDecoderUI.classList.remove('hidden');
+    autoReceiverUI.classList.add('hidden');
+    outputSection.classList.add('hidden');
+    showManualBtn.classList.replace('bg-gray-600', 'bg-teal-500');
+    showAutoBtn.classList.replace('bg-teal-500', 'bg-gray-600');
+});
+
+/**
+ * Core decoding and error correction logic.
+ * @param {string} receivedString - The full string received, including payload and all parity bits.
+ */
+function decodeAndCorrect(receivedString) {
+    // According to the new spec: payload + 5 hamming parity + 1 overall parity
+    const payload = receivedString.slice(0, -R - 1);
+    const receivedHammingParity = receivedString.slice(-R - 1, -1);
+
+    // 1. Reconstruct the conceptual 31-bit codeword from the received payload to recalculate parity.
+    const codewordForCalc = Array(N + 1).fill('0');
+    let payloadIdx = 0;
+    for (let pos = 1; pos <= N; pos++) {
+        if (PARITY_POSITIONS.includes(pos)) continue;
+        if (payloadIdx < payload.length) {
+            codewordForCalc[pos] = payload[payloadIdx];
+            payloadIdx++;
+        }
+    }
+
+    // 2. Recalculate the 5 Hamming parity bits.
+    let recalculatedParity = '';
+    for (const pPos of PARITY_POSITIONS) {
+        let xorSum = 0;
+        for (let bitPos = 1; bitPos <= N; bitPos++) {
+            if ((bitPos & pPos) !== 0) {
+                xorSum ^= parseInt(codewordForCalc[bitPos]);
+            }
+        }
+        recalculatedParity += xorSum.toString();
+    }
+
+    // 3. Calculate the syndrome by XORing received and recalculated parity.
+    let syndromeBinary = '';
+    for (let i = 0; i < R; i++) {
+        syndromeBinary = (parseInt(receivedHammingParity[i]) ^ parseInt(recalculatedParity[i])) + syndromeBinary;
+    }
+    const syndromeDecimal = parseInt(syndromeBinary, 2);
+
+    // 4. Correct the error if one was found.
+    let correctedCodewordArray = Array(N + 1).fill('0');
+    let finalPayload;
+
+    // First, build the full received codeword (data + parity bits in their positions)
+    payloadIdx = 0;
+    for (let pos = 1; pos <= N; pos++) {
+        if (PARITY_POSITIONS.includes(pos)) {
+            const parityIndex = PARITY_POSITIONS.indexOf(pos);
+            correctedCodewordArray[pos] = receivedHammingParity[parityIndex];
+        } else {
+             if (payloadIdx < payload.length) {
+                correctedCodewordArray[pos] = payload[payloadIdx];
+                payloadIdx++;
+            }
+        }
+    }
+    
+    // Now, flip the bit at the error position if syndrome is not zero.
+    if (syndromeDecimal > 0 && syndromeDecimal <= N) {
+        const errorBit = correctedCodewordArray[syndromeDecimal];
+        correctedCodewordArray[syndromeDecimal] = (errorBit === '1' ? '0' : '1');
+    }
+
+    // 5. Extract the corrected payload from the corrected codeword.
+    let correctedPayload = '';
+    for (let pos = 1; pos <= N; pos++) {
+        if (!PARITY_POSITIONS.includes(pos)) {
+            correctedPayload += correctedCodewordArray[pos];
+        }
+    }
+    
+    // 6. Extract message length and the final message.
+    const msgLengthBinary = correctedPayload.substring(0, 5);
+    const msgLength = parseInt(msgLengthBinary, 2);
+    const finalMessage = correctedPayload.substring(5, 5 + msgLength);
+
+    // --- Display Logic ---
+    outputSection.classList.remove('hidden');
+    document.getElementById('received-string').textContent = receivedString;
+    document.getElementById('syndrome').textContent = `${syndromeDecimal} (binary: ${syndromeBinary.padStart(5, '0')})`;
+    
+    // Visualize corrected codeword with highlighting
+    let correctedCodewordHTML = '';
+    const fullCorrectedCodeword = correctedCodewordArray.slice(1).join('');
+    for(let i = 0; i < fullCorrectedCodeword.length; i++) {
+        let classes = 'result-bit';
+        if ((i + 1) === syndromeDecimal) {
+            classes += ' corrected-bit';
+        }
+        correctedCodewordHTML += `<span class="${classes}">${fullCorrectedCodeword[i]}</span>`;
+    }
+    document.getElementById('corrected-codeword').innerHTML = correctedCodewordHTML;
+
+    document.getElementById('msg-length').textContent = msgLength;
+    document.getElementById('final-message').textContent = finalMessage;
+}
+
+// --- Manual Decoder Logic ---
+const manualInput = document.getElementById('manual-input');
+const decodeBtn = document.getElementById('decode-btn');
+decodeBtn.addEventListener('click', () => {
+    const received = manualInput.value.trim();
+    if (!/^[01]+$/.test(received) || received.length < 6) {
+        alert("Invalid input. Please enter a valid binary string.");
+        return;
+    }
+    decodeAndCorrect(received);
+});
+
+// --- Automated Receiver Logic (Simplified for clarity) ---
+// Note: Robust audio analysis in the browser is complex. This is a conceptual implementation.
+const listenBtn = document.getElementById('listen-btn');
+const autoStatus = document.getElementById('auto-status');
+let isListening = false;
+let audioContext, analyser, dataArray, source;
+
+const FREQ_START_END = 5000;
+const FREQ_1 = 1500;
+const FREQ_0 = 500;
+const BIT_MS = 300;
+const GAP_MS = 300;
+
+function findDominantFrequency(dataArray, sampleRate) {
+    let maxVal = -Infinity;
+    let maxIndex = -1;
+    for (let i = 0; i < dataArray.length; i++) {
+        if (dataArray[i] > maxVal) {
+            maxVal = dataArray[i];
+            maxIndex = i;
+        }
+    }
+    // Convert index to frequency
+    return maxIndex * sampleRate / analyser.fftSize;
+}
+
+function isFreqNear(freq, target, tolerance = 50) {
+    return Math.abs(freq - target) < tolerance;
+}
+
+async function startListening() {
+    if (isListening) return;
+    isListening = true;
+    listenBtn.disabled = true;
+    listenBtn.textContent = "Listening...";
+    autoStatus.textContent = "Waiting for START signal (4000 Hz)...";
+
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        analyser = audioContext.createAnalyser();
+        analyser.fftSize = 2048;
+        source = audioContext.createMediaStreamSource(stream);
+        source.connect(analyser);
+        dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+        let state = 'IDLE'; // IDLE, RECEIVING, ENDED
+        let receivedBits = '';
+        let lastBitTime = 0;
+
+        const processAudio = () => {
+            if (!isListening) {
+                 stream.getTracks().forEach(track => track.stop());
+                 return;
+            }
+            analyser.getByteFrequencyData(dataArray);
+            const dominantFreq = findDominantFrequency(dataArray, audioContext.sampleRate);
+            
+            const now = Date.now();
+
+            switch (state) {
+                case 'IDLE':
+                    if (isFreqNear(dominantFreq, FREQ_START_END)) {
+                        state = 'RECEIVING';
+                        lastBitTime = now;
+                        autoStatus.textContent = "START signal detected. Receiving data...";
+                    }
+                    break;
+                case 'RECEIVING':
+                    // Debounce to avoid multiple readings of the same tone
+                    if (now - lastBitTime > (BIT_MS + GAP_MS) * 0.8) {
+                        if (isFreqNear(dominantFreq, FREQ_1)) {
+                            receivedBits += '1';
+                            lastBitTime = now;
+                             autoStatus.textContent = `Receiving... (${receivedBits.length} bits)`;
+                        } else if (isFreqNear(dominantFreq, FREQ_0)) {
+                            receivedBits += '0';
+                            lastBitTime = now;
+                            autoStatus.textContent = `Receiving... (${receivedBits.length} bits)`;
+                        } else if (isFreqNear(dominantFreq, FREQ_START_END) && receivedBits.length > 0) {
+                            state = 'ENDED';
+                        }
+                    }
+                    break;
+                case 'ENDED':
+                    autoStatus.textContent = `END signal detected. Decodifying ${receivedBits.length} bits...`;
+                    stopListening();
+                    decodeAndCorrect(receivedBits);
+                    return; // Stop the loop
+            }
+            requestAnimationFrame(processAudio);
+        };
+        requestAnimationFrame(processAudio);
+
+    } catch (err) {
+        autoStatus.textContent = "Error: Could not access microphone.";
+        console.error("Microphone access error:", err);
+        stopListening();
+    }
+}
+
+function stopListening() {
+    isListening = false;
+    listenBtn.disabled = false;
+    listenBtn.textContent = "Start Listening";
+    if (source) source.disconnect();
+    if (audioContext) audioContext.close();
+}
+
+listenBtn.addEventListener('click', () => {
+    if (isListening) {
+        stopListening();
+        autoStatus.textContent = "Listener stopped.";
+    } else {
+        startListening();
+    }
+});
+
+</script>
+</body>
+</html>
