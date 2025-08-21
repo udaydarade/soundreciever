@@ -66,7 +66,7 @@
                 <p id="corrected-codeword" class="font-mono text-lg break-all"></p>
             </div>
             <div class="pt-2">
-                <p class="text-sm text-gray-400">Extracted Message Length:</p>
+                <p class="text-sm text-gray-400">Error Pos:</p>
                 <p id="msg-length" class="font-mono text-lg text-white"></p>
             </div>
             <div>
@@ -111,96 +111,155 @@ showManualBtn.addEventListener('click', () => {
  * @param {string} receivedString - The full string received, including payload and all parity bits.
  */
 function decodeAndCorrect(receivedString) {
-    // According to the new spec: payload + 5 hamming parity + 1 overall parity
-    const payload = receivedString.slice(0, -R - 1);
-    const receivedHammingParity = receivedString.slice(-R - 1, -1);
+    // Basic validation
+    if (!/^[01]+$/.test(receivedString)) {
+        alert("Input must be a binary string (only 0 and 1).");
+        return;
+    }
+    const minLen = 1 + R;   // at least 1 message bit + 5 parity bits
+    const maxLen = 20 + R;  // at most 20 message bits + 5 parity bits
+    if (receivedString.length < minLen || receivedString.length > maxLen) {
+        alert(`Invalid length. Expect total length between ${minLen} and ${maxLen} bits (message 1–20 bits + ${R} parity bits).`);
+        return;
+    }
 
-    // 1. Reconstruct the conceptual 31-bit codeword from the received payload to recalculate parity.
+    // Split: payload is message bits only, last R bits are the Hamming parity bits
+    const payload = receivedString.slice(0, -R);
+    const payloadLength = payload.length;
+    const receivedHammingParity = receivedString.slice(-R); // length R
+
+    // 1) Build a conceptual 31-bit codeword (1-based idx) for parity recalculation
     const codewordForCalc = Array(N + 1).fill('0');
     let payloadIdx = 0;
     for (let pos = 1; pos <= N; pos++) {
         if (PARITY_POSITIONS.includes(pos)) continue;
-        if (payloadIdx < payload.length) {
+        if (payloadIdx < payloadLength) {
             codewordForCalc[pos] = payload[payloadIdx];
             payloadIdx++;
+        } else {
+            // remaining positions stay '0'
         }
     }
 
-    // 2. Recalculate the 5 Hamming parity bits.
+    // 2) Recalculate the R Hamming parity bits
     let recalculatedParity = '';
     for (const pPos of PARITY_POSITIONS) {
         let xorSum = 0;
         for (let bitPos = 1; bitPos <= N; bitPos++) {
             if ((bitPos & pPos) !== 0) {
-                xorSum ^= parseInt(codewordForCalc[bitPos]);
+                xorSum ^= parseInt(codewordForCalc[bitPos] || '0', 10);
             }
         }
         recalculatedParity += xorSum.toString();
     }
 
-    // 3. Calculate the syndrome by XORing received and recalculated parity.
+    // 3) Syndrome = XOR(receivedParity, recalculatedParity)
     let syndromeBinary = '';
     for (let i = 0; i < R; i++) {
-        syndromeBinary = (parseInt(receivedHammingParity[i]) ^ parseInt(recalculatedParity[i])) + syndromeBinary;
+        const rx = parseInt(receivedHammingParity[i] || '0', 10);
+        const rc = parseInt(recalculatedParity[i] || '0', 10);
+        // Keep ordering consistent with previous implementation (p1 is LSB)
+        syndromeBinary = (rx ^ rc).toString() + syndromeBinary;
     }
-    const syndromeDecimal = parseInt(syndromeBinary, 2);
+    const syndromeDecimal = parseInt(syndromeBinary, 2) || 0;
 
-    // 4. Correct the error if one was found.
+    // 4) Build the full received codeword array (1-based), placing received parity bits in parity positions
     let correctedCodewordArray = Array(N + 1).fill('0');
-    let finalPayload;
-
-    // First, build the full received codeword (data + parity bits in their positions)
     payloadIdx = 0;
     for (let pos = 1; pos <= N; pos++) {
         if (PARITY_POSITIONS.includes(pos)) {
             const parityIndex = PARITY_POSITIONS.indexOf(pos);
-            correctedCodewordArray[pos] = receivedHammingParity[parityIndex];
+            correctedCodewordArray[pos] = receivedHammingParity[parityIndex] || '0';
         } else {
-             if (payloadIdx < payload.length) {
+            if (payloadIdx < payloadLength) {
                 correctedCodewordArray[pos] = payload[payloadIdx];
                 payloadIdx++;
+            } else {
+                correctedCodewordArray[pos] = '0';
             }
         }
     }
-    
-    // Now, flip the bit at the error position if syndrome is not zero.
+
+    // 5) Correct single-bit error if syndrome points to a valid position
+    let correctedPosition = 0;
     if (syndromeDecimal > 0 && syndromeDecimal <= N) {
-        const errorBit = correctedCodewordArray[syndromeDecimal];
-        correctedCodewordArray[syndromeDecimal] = (errorBit === '1' ? '0' : '1');
+        const oldBit = correctedCodewordArray[syndromeDecimal];
+        correctedCodewordArray[syndromeDecimal] = (oldBit === '1' ? '0' : '1');
+        correctedPosition = syndromeDecimal;
     }
 
-    // 5. Extract the corrected payload from the corrected codeword.
+    // 6) Extract corrected payload (only the original payload length)
     let correctedPayload = '';
     for (let pos = 1; pos <= N; pos++) {
         if (!PARITY_POSITIONS.includes(pos)) {
             correctedPayload += correctedCodewordArray[pos];
         }
     }
-    
-    // 6. Extract message length and the final message.
-    const msgLengthBinary = correctedPayload.substring(0, 5);
-    const msgLength = parseInt(msgLengthBinary, 2);
-    const finalMessage = correctedPayload.substring(5, 5 + msgLength);
+    correctedPayload = correctedPayload.substring(0, payloadLength); // respect original message length
 
-    // --- Display Logic ---
+    // 7) Build corrected parity bits (from parity positions) and the full corrected transmitted string
+    let correctedParityBits = '';
+    for (const pPos of PARITY_POSITIONS) {
+        correctedParityBits += correctedCodewordArray[pPos] || '0';
+    }
+    const correctedFullString = correctedPayload + correctedParityBits;
+
+    // 8) Compare receivedString vs correctedFullString to find differing positions (1-based)
+    const diffs = [];
+    const cmpLen = Math.min(receivedString.length, correctedFullString.length);
+    for (let i = 0; i < cmpLen; i++) {
+        if (receivedString[i] !== correctedFullString[i]) diffs.push(i + 1);
+    }
+    // If lengths somehow differ (shouldn't happen), mark remaining as differing
+    if (receivedString.length !== correctedFullString.length) {
+        const longerLen = Math.max(receivedString.length, correctedFullString.length);
+        for (let i = cmpLen; i < longerLen; i++) diffs.push(i + 1);
+    }
+
+    let errorPosText;
+    if (diffs.length === 0) {
+        errorPosText = 'No difference — received string matches corrected string.';
+    } else if (diffs.length === 1) {
+        errorPosText = `Bit ${diffs[0]} differs (single-bit corrected).`;
+    } else {
+        errorPosText = `Bits ${diffs.join(', ')} differ (multiple differences).`;
+    }
+
+    // --- Display logic (keep existing IDs unchanged) ---
     outputSection.classList.remove('hidden');
     document.getElementById('received-string').textContent = receivedString;
-    document.getElementById('syndrome').textContent = `${syndromeDecimal} (binary: ${syndromeBinary.padStart(5, '0')})`;
-    
-    // Visualize corrected codeword with highlighting
+    document.getElementById('syndrome').textContent = `${syndromeDecimal} (binary: ${syndromeBinary.padStart(R, '0')})`;
+
+    // Visualize corrected codeword with highlighting for the corrected position (if any)
     let correctedCodewordHTML = '';
-    const fullCorrectedCodeword = correctedCodewordArray.slice(1).join('');
-    for(let i = 0; i < fullCorrectedCodeword.length; i++) {
+    const fullCorrectedCodeword = correctedCodewordArray.slice(1).join(''); // positions 1..N
+    for (let i = 0; i < fullCorrectedCodeword.length; i++) {
         let classes = 'result-bit';
-        if ((i + 1) === syndromeDecimal) {
+        const pos = i + 1;
+        if (pos === correctedPosition && correctedPosition !== 0) {
             classes += ' corrected-bit';
         }
         correctedCodewordHTML += `<span class="${classes}">${fullCorrectedCodeword[i]}</span>`;
     }
+
+    // Append a plain-text display of the corrected transmitted string (message + parity bits)
+    correctedCodewordHTML += `<div style="margin-top:8px;"><span class="text-sm text-gray-400">Corrected transmitted string (message + parity bits):</span><div class="font-mono text-lg text-white break-all">${correctedFullString}</div></div>`;
+
     document.getElementById('corrected-codeword').innerHTML = correctedCodewordHTML;
 
-    document.getElementById('msg-length').textContent = msgLength;
-    document.getElementById('final-message').textContent = finalMessage;
+    let errorPos = '-';
+for (let i = 0; i < Math.min(receivedString.length, correctedFullString.length); i++) {
+    if (receivedString[i] !== correctedFullString[i]) {
+        errorPos = i + 1; // 1-based index
+        break;
+    }
+}
+
+// Show error position instead of message length
+document.getElementById('msg-length').textContent = errorPos;
+
+    document.getElementById('msg-length').textContent = errorPos;
+    document.getElementById('final-message').textContent = correctedPayload;
 }
 
 // --- Manual Decoder Logic ---
